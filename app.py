@@ -2,6 +2,7 @@ import random
 from pathlib import Path
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
 from sklearn.ensemble import IsolationForest
@@ -295,19 +296,62 @@ st.markdown(
 
 @st.cache_data
 def load_data():
+    def normalize_creditcard_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        frame = frame.copy()
+        frame.columns = [str(column).strip() for column in frame.columns]
+
+        if "Class" not in frame.columns:
+            raise ValueError("Input data must include a 'Class' column.")
+
+        required_features = [column for column in frame.columns if column != "Class"]
+        numeric_columns = required_features + ["Class"]
+        for column in numeric_columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+        frame = frame.dropna(subset=numeric_columns)
+        if frame.empty:
+            raise ValueError("All rows became invalid after numeric coercion.")
+
+        frame["Class"] = frame["Class"].astype(int)
+        frame.attrs["source"] = "validated"
+        return frame
+
+    def synthetic_creditcard_frame(rows: int = 5000) -> pd.DataFrame:
+        synthetic = pd.DataFrame({"Time": np.arange(rows, dtype=float)})
+        for index in range(1, 29):
+            synthetic[f"V{index}"] = np.random.normal(0.0, 1.0, size=rows)
+        synthetic["Amount"] = np.clip(np.random.gamma(shape=2.0, scale=55.0, size=rows), 1, 50000)
+        synthetic["Class"] = (np.random.rand(rows) < 0.02).astype(int)
+        synthetic.attrs["source"] = "synthetic"
+        return synthetic
+
     local_path = Path(__file__).with_name("creditcard.csv")
 
     if local_path.exists():
-        return pd.read_csv(local_path)
+        local_frame = pd.read_csv(local_path)
+        local_frame.attrs["source"] = "local"
+        return normalize_creditcard_frame(local_frame)
 
-    url = "https://drive.google.com/uc?id=1R3a_Cwv_gmoBxBat0S0c_G5TquJ5XzLd"
-    return pd.read_csv(url)
+    remote_urls = [
+        "https://drive.google.com/uc?id=1R3a_Cwv_gmoBxBat0S0c_G5TquJ5XzLd",
+        "https://storage.googleapis.com/download.tensorflow.org/data/creditcard.csv",
+    ]
+
+    for url in remote_urls:
+        try:
+            remote_frame = pd.read_csv(url)
+            remote_frame.attrs["source"] = f"remote:{url}"
+            return normalize_creditcard_frame(remote_frame)
+        except Exception:
+            continue
+
+    return synthetic_creditcard_frame()
 
 
 @st.cache_resource
 def train_model(frame: pd.DataFrame):
     feature_cols = [column for column in frame.columns if column != "Class"]
-    features = frame[feature_cols].copy()
+    features = frame[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     fitted_model = IsolationForest(contamination=0.002, random_state=42)
     fitted_model.fit(features)
     score_values = fitted_model.decision_function(features)
@@ -350,6 +394,12 @@ def style_altair(chart: alt.Chart) -> alt.Chart:
 
 data = load_data()
 model_data = data.copy()
+
+if data.attrs.get("source") == "synthetic":
+    st.warning(
+        "Live credit-card dataset could not be fetched in this environment. "
+        "Using a synthetic fallback dataset so the demo remains fully functional."
+    )
 
 if "transaction_count" not in st.session_state:
     st.session_state.transaction_count = 0
